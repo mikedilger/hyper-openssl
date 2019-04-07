@@ -49,9 +49,8 @@ pub extern crate openssl;
 use antidote::{Mutex, MutexGuard};
 use hyper::net::{SslClient, SslServer, NetworkStream};
 use openssl::error::ErrorStack;
-use openssl::ssl::{self, SslMethod, SslConnector, SslConnectorBuilder, SslAcceptor,
-                   SslAcceptorBuilder, SslSession, SslRef};
-use openssl::x509::X509_FILETYPE_PEM;
+use openssl::ssl::{self, SslMethod, SslConnector, SslAcceptor,
+                   SslSession, SslRef, SslFiletype};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, Read, Write};
@@ -79,7 +78,7 @@ pub struct OpensslClient {
 impl OpensslClient {
     /// Creates a new `OpenSslClient` with default settings.
     pub fn new() -> Result<OpensslClient, ErrorStack> {
-        let connector = SslConnectorBuilder::new(SslMethod::tls())?.build();
+        let connector = SslConnector::builder(SslMethod::tls())?.build();
         Ok(OpensslClient::from(connector))
     }
 
@@ -124,7 +123,7 @@ impl<T> SslClient<T> for OpensslClient
             .configure()
             .map_err(|e| hyper::Error::Ssl(Box::new(e)))?;
         if let Some(ref callback) = self.ssl_callback {
-            callback(conf.ssl_mut(), host)
+            callback(conf.deref_mut(), host)
                 .map_err(|e| hyper::Error::Ssl(Box::new(e)))?;
         }
         let key = SessionKey {
@@ -133,13 +132,15 @@ impl<T> SslClient<T> for OpensslClient
         };
         if let Some(session) = self.session_cache.lock().get(&key) {
             unsafe {
-                conf.ssl_mut()
+                conf.deref_mut()
                     .set_session(session)
                     .map_err(|e| hyper::Error::Ssl(Box::new(e)))?;
             }
         }
         let stream = if self.disable_verification {
-            conf.danger_connect_without_providing_domain_for_certificate_verification_and_server_name_indication(stream)
+            conf.use_server_name_indication(false)
+                .verify_hostname(false)
+                .connect("", stream)
         } else {
             conf.connect(host, stream)
         };
@@ -178,11 +179,11 @@ impl OpensslServer {
         where P: AsRef<Path>,
               Q: AsRef<Path>
     {
-        let mut ssl = SslAcceptorBuilder::mozilla_intermediate_raw(SslMethod::tls())?;
-        ssl.builder_mut()
-            .set_private_key_file(key, X509_FILETYPE_PEM)?;
-        ssl.builder_mut().set_certificate_chain_file(certs)?;
-        ssl.builder_mut().check_private_key()?;
+        let mut ssl = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+        ssl.deref_mut()
+            .set_private_key_file(key, SslFiletype::PEM)?;
+        ssl.deref_mut().set_certificate_chain_file(certs)?;
+        ssl.deref_mut().check_private_key()?;
         Ok(OpensslServer(ssl.build()))
     }
 }
@@ -284,8 +285,9 @@ mod test {
     use hyper::{Client, Server};
     use hyper::server::{Request, Response, Fresh};
     use hyper::net::HttpsConnector;
-    use openssl::ssl::{SslMethod, SslConnectorBuilder};
+    use openssl::ssl::{SslMethod, SslConnector};
     use std::io::Read;
+    use std::ops::DerefMut;
     use std::mem;
 
     use {OpensslClient, OpensslServer};
@@ -313,9 +315,9 @@ mod test {
         let port = listening.socket.port();
         mem::forget(listening);
 
-        let mut connector = SslConnectorBuilder::new(SslMethod::tls()).unwrap();
+        let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
         connector
-            .builder_mut()
+            .deref_mut()
             .set_ca_file("test/cert.pem")
             .unwrap();
         let ssl = OpensslClient::from(connector.build());
